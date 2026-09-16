@@ -24,7 +24,7 @@
 #   --deterministic warn   (reproducible run; see training.deterministic below)
 # =============================================================================
 
-job_id: solar_flare_forecasting
+job_id: solar_ch_forecasting
 
 
 # -----------------------------------------------------------------------------
@@ -43,9 +43,10 @@ data:
   time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
 
   # -- Downstream label alignment (flare catalog → Surya index) --
-  flare_index_path: ../data/hek_flare_catalog.csv
-  ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
-  ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
+  ch_index_path: ../data/ch_index.csv  # R: changed from "flare_index_path" in template
+  ch_mask_base_path: /home/jovyan/scratch_space/raphaela # R: Base path of the masks
+  ds_time_column: event_time      # Column in the ch catalog used as the event timestamp
+  ds_time_tolerance: 4h           # Max allowed gap between catalog and Surya timestamps R: (was 4d)
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
 
   # -- Local data (only needed when the index contains relative local paths) --
@@ -79,7 +80,7 @@ data:
   #
   # If none is set and the index contains s3:// paths, the run fails immediately with a
   # suggested path — not part-way through the first epoch. ~ and $ENV_VARS are expanded.
-  s3_cache_dir: null
+  s3_cache_dir: /home/jovyan/scratch_space/surya_cache/ 
 
   # -- S3 transfer tuning --
   # These control boto3's multipart download: how many threads download parts in

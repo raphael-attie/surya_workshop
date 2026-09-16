@@ -29,16 +29,18 @@ from workshop_infrastructure.configs import (  # re-exported for convenience
 
 
 @dataclass
-class FlareDataConfig(DataConfig):
-    """DataConfig plus the flare-catalog alignment settings used by ``FlareDSDataset``.
+class CHDataConfig(DataConfig):
+    """DataConfig plus the flare-catalog alignment settings used by ``CHDSDataset``.
 
-    These four keys are what makes this app's ``data:`` section different from any other
+    These five keys are what makes this app's ``data:`` section different from any other
     downstream task's. Swap them for your own when you fork.
     """
     # Path to the label catalog (relative paths resolve against the config file's dir).
-    flare_index_path: str = ""
+    ch_index_path: str = ""
     # Column in the catalog holding the event timestamp.
     ds_time_column: str = "start_time"
+    # Base path to the masks
+    ch_mask_base_path: str = ""
     # Max allowed gap when matching catalog events to Surya timesteps.
     ds_time_tolerance: str = "4d"
     # "forward" uses the solar state *before* the flare (causal prediction).
@@ -46,17 +48,17 @@ class FlareDataConfig(DataConfig):
 
     # flare_index_path is a path, so it must join the base class's list to get the same
     # relative-to-the-config-file resolution. Extend this whenever you add a path field.
-    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + ("flare_index_path",)
+    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + ("ch_index_path",)
 
 
 # The app's entry point. Identical to load_config() except that the data: section is
 # parsed into FlareDataConfig, so the four keys above are recognized instead of rejected.
-load_flare_config = partial(load_config, data_cls=FlareDataConfig)
+load_ch_config = partial(load_config, data_cls=CHDataConfig)
 
 
 __all__ = [
-    "FlareDataConfig",
-    "load_flare_config",
+    "CHDataConfig",
+    "load_ch_config",
     # Re-exports so app code can import everything config-related from one place.
     "DataConfig",
     "OutputConfig",
