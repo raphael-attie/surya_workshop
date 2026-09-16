@@ -16,6 +16,7 @@ propagated to the logger (e.g. WandB, CSV).
 """
 
 import torch
+import torch.nn.functional as F
 import torchmetrics as tm  # Lots of possible metrics in here https://lightning.ai/docs/torchmetrics/stable/all-metrics.html
 
 # Shape contract: predictions arrive as (B,) from HelioSpectformer1D or (B, 1) from the
@@ -23,47 +24,73 @@ import torchmetrics as tm  # Lots of possible metrics in here https://lightning.
 # reshape(-1) rather than squeeze(-1): squeeze is shape-dependent and collapses a
 # batch of one to a 0-d scalar, which then fails to broadcast against a (1,) target.
 class CHThresholdMetrics:
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, bce_weight: float = 1.0, dice_weight: float = 1.0, eps: float = 1e-6):
         """
-        Initialize CHMetrics class.
+        Initialize CHThresholdMetrics class.
 
         Args:
             mode (str): Mode to use for metric evaluation. One of "train_loss",
                         "val_loss", "train_metrics", or "val_metrics".
+            bce_weight (float): Weight applied to the BCE term in train_loss/val_loss.
+            dice_weight (float): Weight applied to the soft-Dice term in train_loss/val_loss.
+            eps (float): Numerical-stability constant added to both the numerator and
+                        denominator of every Dice/IoU ratio, so a sample with no predicted
+                        and no true CH pixels (0/0) scores a perfect match instead of NaN.
         """
         self.mode = mode
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.eps = eps
 
-        # Cache torchmetrics instances once (instead of recreating each call)
-        self._rrse = tm.RelativeSquaredError(squared=False)
+    def _soft_dice_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Differentiable soft-Dice loss computed from raw logits.
 
-    def _ensure_device(self, preds: torch.Tensor) -> None:
-        """Move torchmetrics modules to the same device as ``preds``, if needed."""
-        if self._rrse.device != preds.device:
-            self._rrse = self._rrse.to(preds.device)
+        Args:
+            logits (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask, shape (B, H, W).
+
+        Returns:
+            torch.Tensor: Scalar ``1 - dice``, averaged over the batch.
+        """
+        probs = torch.sigmoid(logits)
+
+        probs_flat = probs.reshape(probs.shape[0], -1)
+        target_flat = target.reshape(target.shape[0], -1)
+
+        intersection = (probs_flat * target_flat).sum(dim=1)
+        dice = (2 * intersection + self.eps) / (
+            probs_flat.sum(dim=1) + target_flat.sum(dim=1) + self.eps
+        )
+
+        return (1 - dice).mean()
+
 
     def train_loss(
         self, preds: torch.Tensor, target: torch.Tensor
     ) -> tuple[dict[str, torch.Tensor], list[float]]:
         """
-        Calculate loss metrics for training.
+        Calculate loss metrics for training: binary cross-entropy + soft-Dice.
 
         Args:
-            preds (torch.Tensor): Model predictions.
-            target (torch.Tensor): Ground truth labels.
+            preds (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask, shape (B, H, W).
 
         Returns:
             tuple[dict[str, torch.Tensor], list[float]]:
-                - dict[str, torch.Tensor]: Dictionary containing the calculated loss metrics.
-                                        Keys are metric names (e.g., "mse"), and values are the
-                                        corresponding torch.Tensor values.
-                - list[float]: List of weights for each calculated metric.
+                - dict[str, torch.Tensor]: {"bce": ..., "dice": ...}.
+                - list[float]: [self.bce_weight, self.dice_weight].
         """
-
+        target = target.float()
+        
         output_metrics = {}
         output_weights = []
 
-        output_metrics["mse"] = torch.nn.functional.mse_loss(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)
+        output_metrics["bce"] = F.binary_cross_entropy_with_logits(preds, target)
+        output_weights.append(self.bce_weight)
+
+        output_metrics["dice"] = self._soft_dice_loss(preds, target)
+        output_weights.append(self.dice_weight)
 
         return output_metrics, output_weights
 
@@ -74,83 +101,90 @@ class CHThresholdMetrics:
         Calculate the validation loss — the quantity logged as ``val_loss`` and used by
         ModelCheckpoint to select the best model.
 
-        By default this delegates to ``train_loss``, so the monitored quantity has the same
-        form as the training objective and the two cannot drift apart by accident. This is
-        the hook to override when your task needs a different validation objective (a
-        different weighting, a metric that is meaningful only on held-out data, etc.).
-
-        Note that this is deliberately separate from ``val_metrics``: those are reported
-        for information only and do not affect checkpoint selection.
+        Delegates to ``train_loss`` (same BCE + soft-Dice objective), matching
+        ``FlareMetrics.val_loss``'s default-delegation pattern (from the template).
 
         Args:
-            preds (torch.Tensor): Model predictions.
-            target (torch.Tensor): Ground truth labels.
+            preds (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask, shape (B, H, W).
 
         Returns:
-            tuple[dict[str, torch.Tensor], list[float]]:
-                - dict[str, torch.Tensor]: Dictionary containing the calculated loss metrics.
-                - list[float]: List of weights for each calculated metric.
+            tuple[dict[str, torch.Tensor], list[float]]: Same shape as ``train_loss``.
         """
         return self.train_loss(preds, target)
 
+    def _hard_iou_dice(
+        self, preds: torch.Tensor, target: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Non-differentiable IoU and Dice coefficient computed from a hard-thresholded mask.
+
+        Args:
+            preds (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask (already float), shape (B, H, W).
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: (iou, dice_coef), each a scalar averaged
+            over the batch.
+        """
+        probs = torch.sigmoid(preds)
+        pred_mask = (probs > 0.5).float()
+
+        pred_flat = pred_mask.reshape(pred_mask.shape[0], -1)
+        target_flat = target.reshape(target.shape[0], -1)
+
+        intersection = (pred_flat * target_flat).sum(dim=1)
+        pred_sum = pred_flat.sum(dim=1)
+        target_sum = target_flat.sum(dim=1)
+        union = pred_sum + target_sum - intersection
+
+        # eps guards the empty/empty case (no predicted or true CH pixels in a sample):
+        # union == 0 and intersection == 0 would otherwise divide 0/0 -> NaN. With eps,
+        # both iou and dice_coef evaluate to 1.0 for that sample instead.
+        iou = (intersection + self.eps) / (union + self.eps)
+        dice_coef = (2 * intersection + self.eps) / (pred_sum + target_sum + self.eps)
+
+        return iou.mean(), dice_coef.mean()
+    
     def train_metrics(
         self, preds: torch.Tensor, target: torch.Tensor
     ) -> tuple[dict[str, torch.Tensor], list[float]]:
         """
-        Calculate evaluation metrics for training.
+        Calculate evaluation metrics for training: hard IoU and Dice coefficient.
         IMPORTANT:  These metrics are only for reporting purposes and do not
-                    contribute to the training loss. Use only if you want to
-                    monitor additional metrics during training.
+                    contribute to the training loss.
 
         Args:
-            preds (torch.Tensor): Model predictions.
-            target (torch.Tensor): Ground truth labels.
+            preds (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask, shape (B, H, W).
 
         Returns:
             tuple[dict[str, torch.Tensor], list[float]]:
-                - dict[str, torch.Tensor]: Dictionary containing the calculated evaluation metrics.
-                                        Keys are metric names, and values are the corresponding torch.Tensor values.
-                - list[float]: List of weights for each calculated metric.
+                - dict[str, torch.Tensor]: {"iou": ..., "dice_coef": ...}.
+                - list[float]: [1, 1].
         """
-        output_metrics = {}
-        output_weights = []
-
-        self._ensure_device(preds)
-        output_metrics["rrse"] = self._rrse(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)        
-
-
-        return output_metrics, output_weights
+        iou, dice_coef = self._hard_iou_dice(preds, target.float())
+        return {"iou": iou, "dice_coef": dice_coef}, [1, 1]
 
     def val_metrics(
         self, preds: torch.Tensor, target: torch.Tensor
     ) -> tuple[dict[str, torch.Tensor], list[float]]:
         """
-        Calculate metrics for validation.
+        Calculate metrics for validation: hard IoU and Dice coefficient.
+
+        Delegates to ``train_metrics`` — the spec has train_metrics and val_metrics report
+        the identical {"iou", "dice_coef"} pair here (unlike FlareMetrics.val_metrics,
+        which adds an extra term), so there's nothing to compute independently.
 
         Args:
-            preds (torch.Tensor): Model predictions.
-            target (torch.Tensor): Ground truth labels.
+            preds (torch.Tensor): Model output logits, shape (B, H, W).
+            target (torch.Tensor): Ground truth mask, shape (B, H, W).
 
         Returns:
-            tuple[dict[str, torch.Tensor], list[float]]:
-                - dict[str, torch.Tensor]: Dictionary containing the calculated metrics.
-                                        Keys are metric names (e.g., "mse"), and values are the
-                                        corresponding torch.Tensor values.
-                - list[float]: List of weights for each calculated metric.
+            tuple[dict[str, torch.Tensor], list[float]]: Same shape as ``train_metrics``.
         """
 
-        output_metrics = {}
-        output_weights = []
-
-        output_metrics["mse"] = torch.nn.functional.mse_loss(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)
-
-        self._ensure_device(preds)
-        output_metrics["rrse"] = self._rrse(preds.reshape(-1), target.reshape(-1))
-        output_weights.append(1)            
-
-        return output_metrics, output_weights
+        return self.train_metrics(preds, target)
 
     def __call__(
         self, preds: torch.Tensor, target: torch.Tensor
@@ -158,8 +192,8 @@ class CHThresholdMetrics:
         """Evaluate metrics for the mode set at construction time.
 
         Args:
-            preds: Model output tensor. Shape depends on the application.
-            target: Ground truth tensor to compare against.
+            preds: Model output logits, shape (B, H, W).
+            target: Ground truth mask tensor to compare against, shape (B, H, W).
 
         Returns:
             tuple[dict[str, torch.Tensor], list[float]]:
