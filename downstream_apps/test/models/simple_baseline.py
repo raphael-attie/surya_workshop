@@ -14,12 +14,6 @@ class ThresholdCHModel(nn.Module):
 
         Args:
             input_dim (int): The size of the input vector after channel and time dimensions are flattened.
-
-        Note:
-            This model expects 'ts' in the batch dict to already be in **signum-log** space
-            (channel z-scores undone, log compression retained). Use
-            destandardize_channels() to pre-process normalized SDO inputs before passing
-            them here (e.g., via the preprocess_fn argument of FlareLightningModule).
         """
         super().__init__()
         self.channel_index = channel_index

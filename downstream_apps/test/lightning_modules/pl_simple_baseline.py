@@ -3,7 +3,7 @@ pl_simple_baseline.py
 
 A minimal PyTorch Lightning wrapper for training a flare prediction model.
 
-This module defines a single LightningModule (FlareLightningModule) that:
+This module defines a single LightningModule (CHLightningModule) that:
   - Calls a user-provided PyTorch model on batched inputs (batch["ts"])
   - Computes one or more training/validation losses via a user-provided loss function
   - Logs scalar losses and evaluation metrics using Lightning's built-in logging
@@ -53,7 +53,7 @@ MetricDict = Mapping[str, torch.Tensor]
 Weights = Any  # often a list[float] or list[torch.Tensor]
 
 
-class FlareLightningModule(L.LightningModule):
+class CHLightningModule(L.LightningModule):
     """
     PyTorch LightningModule for flare prediction training.
 
@@ -97,12 +97,6 @@ class FlareLightningModule(L.LightningModule):
         Optional batch size passed to Lightning's `self.log(..., batch_size=...)`.
         This improves correct averaging behavior when using distributed settings
         or variable batch sizes.
-
-    preprocess_fn:
-        Optional callable applied to the batch dict before every model call.
-        Signature: ``(batch: dict) -> dict``. Use this to apply input
-        transformations (e.g., ``destandardize_channels``) without
-        embedding them in the model itself.
     """
 
     def __init__(
@@ -236,10 +230,8 @@ class FlareLightningModule(L.LightningModule):
           of this method are reported only and do not affect checkpoint selection.
         - No value is returned (Lightning uses logs for validation tracking).
         """
-        target = batch["forecast"].unsqueeze(1).float()
+        target = batch["mask"].float()
 
-        if self.preprocess_fn is not None:
-            batch = self.preprocess_fn(batch)
         output = self(batch)
         val_losses, val_loss_weights = self.validation_loss(output, target)
         loss = self._combine_losses(val_losses, val_loss_weights)
