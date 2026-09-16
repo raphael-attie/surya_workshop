@@ -22,10 +22,10 @@ import torchmetrics as tm  # Lots of possible metrics in here https://lightning.
 # linear baseline, while targets are always (B, 1). Every metric below flattens both with
 # reshape(-1) rather than squeeze(-1): squeeze is shape-dependent and collapses a
 # batch of one to a 0-d scalar, which then fails to broadcast against a (1,) target.
-class FlareMetrics:
+class CHThresholdMetrics:
     def __init__(self, mode: str):
         """
-        Initialize FlareMetrics class.
+        Initialize CHMetrics class.
 
         Args:
             mode (str): Mode to use for metric evaluation. One of "train_loss",

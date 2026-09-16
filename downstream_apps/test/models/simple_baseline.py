@@ -24,7 +24,7 @@ class ThresholdCHModel(nn.Module):
         super().__init__()
         self.channel_index = channel_index
         self.threshold = nn.Parameter(torch.tensor(float(starting_threshold)))
-
+        self.temperature = temperature  # fixed; controls sigmoid sharpness, not learned
 
     
     def forward(self, x: dict) -> torch.Tensor:
