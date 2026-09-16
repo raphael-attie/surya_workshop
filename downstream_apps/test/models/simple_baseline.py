@@ -1,5 +1,5 @@
 """
-A simple linear regression model to be used as a baseline for flare forecasting.
+A baseline for CH segmentation with learnable intensity threshold taking advantage of the z-score / standardization of the AIA data. 
 """
 
 import torch
@@ -10,7 +10,7 @@ from einops import rearrange
 class ThresholdCHModel(nn.Module):
     def __init__(self, channel_index: int = 3, starting_threshold: float= -0.2, temperature: float = 0.05):
         """
-        Initializes the RegressionFlareModel.
+        Initializes the model.
 
         Args:
             input_dim (int): The size of the input vector after channel and time dimensions are flattened.
