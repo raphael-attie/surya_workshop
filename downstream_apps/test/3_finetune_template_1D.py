@@ -42,10 +42,10 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
 from torch.utils.data import DataLoader
 
-from downstream_apps.template.configs import TrainingConfig, load_flare_config
-from downstream_apps.template.datasets.template_dataset import FlareDSDataset
-from downstream_apps.template.lightning_modules.pl_simple_baseline import FlareLightningModule
-from downstream_apps.template.metrics.template_metrics import FlareMetrics
+from downstream_apps.test.configs import TrainingConfig, load_flare_config
+from downstream_apps.test.datasets.template_dataset import CHDSDataset
+from downstream_apps.test.lightning_modules.pl_simple_baseline import CHLightningModule
+from downstream_apps.test.metrics.template_metrics import CHThresholdMetrics
 from workshop_infrastructure.assets import ensure_assets
 from workshop_infrastructure.datasets.builders import build_helio_dataloaders
 from workshop_infrastructure.utils import (
@@ -92,19 +92,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _flare_label_transform(intensity: "pd.Series") -> "pd.Series":
-    """Normalize flare peak intensity for the template task.
-
-    Converts raw GOES intensity to a z-score-like label:
-      1. Take log10 (intensity values span many orders of magnitude).
-      2. Shift so the minimum is 0.
-      3. Scale by 2 * std so most values fall in [-1, 1].
-    """
-    import numpy as np
-    log_intensity = np.log10(intensity)
-    shifted = log_intensity - log_intensity.min()
-    return shifted / (2 * shifted.std())
-
 
 def build_datasets(cfg: TrainingConfig, scalers) -> Tuple[DataLoader, DataLoader]:
     """Create train and validation DataLoaders from config.
@@ -118,13 +105,13 @@ def build_datasets(cfg: TrainingConfig, scalers) -> Tuple[DataLoader, DataLoader
     """
     return build_helio_dataloaders(
         cfg,
-        FlareDSDataset,
+        CHDSDataset,
         scalers=scalers,
         seed=cfg.seed,
         return_surya_stack=True,
         max_number_of_samples=cfg.data.max_samples,
-        label_transform=_flare_label_transform,
-        ds_flare_index_path=cfg.data.flare_index_path,
+        ds_ch_index_path=cfg.data.ch_index_path,
+        ds_ch_mask_base_path=cfg.data.ch_mask_base_path,
         ds_time_column=cfg.data.ds_time_column,
         ds_time_tolerance=cfg.data.ds_time_tolerance,
         ds_match_direction=cfg.data.ds_match_direction,
@@ -157,11 +144,12 @@ def build_model(cfg: TrainingConfig, scalers, train_baseline: bool = False) -> L
         preprocess_fn = partial(destandardize_channels, channel_order=cfg.data.channels, scalers=scalers)
         return FlareLightningModule(model, metrics, lr=cfg.learning_rate, batch_size=cfg.batch_size, preprocess_fn=preprocess_fn)
     else:
-        from workshop_infrastructure.models.finetune_models import HelioSpectformer1D
-        model = HelioSpectformer1D.from_config(
+        from workshop_infrastructure.models.finetune_models import HelioSpectformer2D
+        model = HelioSpectformer2D.from_config(
             cfg.model,
             num_outputs=1,
             dtype=cfg.dtype,
+            ft_out_chans=1,
             use_latitude_in_learned_flow=cfg.use_latitude_in_learned_flow,
         )
         load_pretrained_weights(model, cfg.model.pretrained_path)
@@ -252,7 +240,7 @@ def main() -> None:
     args = parse_args()
     torch.set_float32_matmul_precision("medium")
 
-    cfg = load_flare_config(args.config)
+    cfg = load_ch_config(args.config)
     # Seeding comes after the config load, so the seed is a configured value rather than
     # a constant buried in the code. Seeds Python, NumPy and torch in this process;
     # workers=True extends it to DataLoader workers.

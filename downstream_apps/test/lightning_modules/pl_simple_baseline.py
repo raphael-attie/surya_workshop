@@ -153,7 +153,14 @@ class CHLightningModule(L.LightningModule):
         torch.Tensor
             Model predictions for the batch.
         """
-        return self.model(batch)
+        output = self.model(batch)
+        
+        # HelioSpectformer2D (ft_out_chans=1) returns (B, 1, H, W); squeeze the singleton
+        # output-channel dim so preds line up with the (B, H, W) masks the metrics expect.
+        if output.ndim == 4 and output.shape[1] == 1:
+            output = output.squeeze(1)
+                
+        return output
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """
