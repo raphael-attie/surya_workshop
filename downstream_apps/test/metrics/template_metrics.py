@@ -1,5 +1,5 @@
 """
-Template metrics for flare forecasting.
+Template metrics for coronal hole segmentation.
 
 FlareMetrics defines four metric sets:
 - "train_loss"    — differentiable loss that drives backpropagation (MSE).
