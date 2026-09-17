@@ -1,5 +1,5 @@
 """
-Template metrics for flare forecasting.
+Metrics for flare forecasting.
 
 FlareMetrics defines four metric sets:
 - "train_loss"    — differentiable loss that drives backpropagation (MSE).
