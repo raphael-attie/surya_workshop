@@ -16,7 +16,7 @@ Intended use:
 
 Key batch contract:
   - batch["ts"]       : torch.Tensor input stack (e.g., [B, C, T, H, W])
-  - batch["forecast"] : torch.Tensor target values (e.g., [B] or [B,])
+  - batch["mask"] : torch.Tensor target values (e.g., [B] or [B,])
 
 Optional preprocessing:
   - If ``preprocess_fn`` is provided to ``__init__``, it is called on the batch dict
@@ -146,7 +146,7 @@ class CHLightningModule(L.LightningModule):
         Parameters
         ----------
         batch:
-            Batch dict (at minimum contains ``"ts"`` and ``"forecast"``).
+            Batch dict (at minimum contains ``"ts"`` and ``"mask"``).
 
         Returns
         -------
@@ -163,7 +163,7 @@ class CHLightningModule(L.LightningModule):
         --------
         1) Extract inputs and targets from the batch:
               x = batch["ts"]
-              target = batch["forecast"]
+              target = batch["mask"]
         2) Compute model output:
               output = self(x)
         3) Compute per-component losses and combine via provided weights:
@@ -185,10 +185,8 @@ class CHLightningModule(L.LightningModule):
         torch.Tensor
             The scalar training loss used for backpropagation.
         """
-        target = batch["forecast"].unsqueeze(1).float()
+        target = batch["mask"].float()
 
-        if self.preprocess_fn is not None:
-            batch = self.preprocess_fn(batch)
         output = self(batch)
         training_losses, training_loss_weights = self.training_loss(output, target)
         loss = self._combine_losses(training_losses, training_loss_weights)
