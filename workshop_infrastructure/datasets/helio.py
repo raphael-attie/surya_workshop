@@ -230,17 +230,29 @@ def transform(
         epsilons: Per-channel small constants that prevent division by zero, shape (C,).
 
     Returns:
-        Normalized array of shape (C, H, W).
-    """
-    means = means.reshape(*means.shape, 1, 1)
-    stds = stds.reshape(*stds.shape, 1, 1)
-    sl_scale_factors = sl_scale_factors.reshape(*sl_scale_factors.shape, 1, 1)
-    epsilons = epsilons.reshape(*epsilons.shape, 1, 1)
+        Normalized array of shape (C, H, W), dtype float32.
 
-    data = data * sl_scale_factors
-    data = np.sign(data) * np.log1p(np.abs(data))
-    data = (data - means) / (stds + epsilons)
-    return data
+    Memory note: this runs once per (C, H, W) sample inside DataLoader workers on
+    full-resolution 13-channel 4096x4096 frames. The loop below processes one channel
+    at a time with in-place NumPy ops, so peak scratch is two (H, W) float32 buffers
+    (~64 MiB each) instead of the ~4-5 full-stack float64 temporaries a vectorized
+    formulation allocates. The math is identical: per channel,
+    y = sign(x*s) * log1p(|x*s|), then (y - mean) / (std + epsilon).
+    """
+    data = np.asarray(data, dtype=np.float32)
+    C = data.shape[0]
+    out = np.empty_like(data)
+    for c in range(C):
+        # work buffers, freed (and reallocated) once per channel
+        d = np.multiply(data[c], sl_scale_factors[c])   # x * s, sign preserved
+        sign = np.sign(d)
+        np.abs(d, out=d)                               # |x * s|
+        np.log1p(d, out=d)                             # log1p(|x * s|)
+        np.multiply(d, sign, out=d)                    # sign(x*s) * log1p(|x*s|)
+        np.subtract(d, means[c], out=d)
+        np.divide(d, stds[c] + epsilons[c], out=d)
+        out[c] = d
+    return out
 
 
 def inverse_transform_single_channel(data, mean, std, sl_scale_factor, epsilon):
@@ -514,10 +526,17 @@ class HelioNetCDFDataset(Dataset):
             )
 
         # Pre-compute normalization arrays once (avoids repeated dict lookups per sample).
-        self._means = np.array([self.scalers[ch].mean for ch in self.channels])
-        self._stds = np.array([self.scalers[ch].std for ch in self.channels])
-        self._epsilons = np.array([self.scalers[ch].epsilon for ch in self.channels])
-        self._sl_scale_factors = np.array([self.scalers[ch].sl_scale_factor for ch in self.channels])
+        # dtype=np.float32 matters for memory: these statistics enter the per-sample
+        # normalization in transform(), and np.array defaults to float64. A float64
+        # (C,1,1) multiplier silently promotes every (C,H,W) float32 sample to float64
+        # (13 x 4096 x 4096 x 8 bytes ~ 1.66 GiB instead of 832 MiB), doubling the size
+        # of every sample, prefetch queue slot, and pinned batch in CPU RAM. float32
+        # statistics differ from float64 by ~1e-7 relative — far below bf16-mixed
+        # training noise — so this is accuracy-neutral.
+        self._means = np.array([self.scalers[ch].mean for ch in self.channels], dtype=np.float32)
+        self._stds = np.array([self.scalers[ch].std for ch in self.channels], dtype=np.float32)
+        self._epsilons = np.array([self.scalers[ch].epsilon for ch in self.channels], dtype=np.float32)
+        self._sl_scale_factors = np.array([self.scalers[ch].sl_scale_factor for ch in self.channels], dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Index filtering

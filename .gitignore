@@ -234,3 +234,6 @@ wandb/
 *.json
 unified_report.md
 variance_accounting.txt
+
+# Pycharm
+.idea

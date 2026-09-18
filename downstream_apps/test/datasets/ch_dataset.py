@@ -177,4 +177,7 @@ class CHDSDataset(HelioNetCDFDataset):
         with fits.open(mask_full_path) as hdul:
             mask_data = hdul[0].data
         
-        return mask_data
+        # R: force float32. FITS masks are commonly float64; a 4096x4096 float64 mask
+        # is 134 MB per sample versus 67 MB in float32. The Lightning module calls
+        # .float() on the target anyway, so this is accuracy-neutral.
+        return np.asarray(mask_data, dtype=np.float32)

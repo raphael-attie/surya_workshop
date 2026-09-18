@@ -112,6 +112,8 @@ def build_helio_dataloaders(
     dataset_cls: Type[Dataset],
     scalers: Any = None,
     num_workers: int | None = None,
+    prefetch_factor: int | None = None,
+    val_num_workers: int | None = None,
     seed: int | None = None,
     **task_kwargs,
 ) -> Tuple[DataLoader, DataLoader]:
@@ -123,6 +125,18 @@ def build_helio_dataloaders(
         scalers: Normalization statistics; built from the config if omitted.
         num_workers: Override for ``cfg.num_workers`` (useful in notebooks, where fewer
             workers start faster).
+        prefetch_factor: Number of batches each worker may hold in flight. The
+            DataLoader default of 2 is sized for small images; with full-resolution
+            Surya samples (13 x 4096 x 4096 float32 ~ 832 MiB each, batch_size x that
+            per batch) the default means ``num_workers x 2`` batches resident per loader
+            in unswappable prefetch queues — at 4 workers and batch_size 2 that is
+            ~13 GiB of CPU RAM per loader doing nothing but waiting. ``prefetch_factor=1`` keeps one batch in flight per worker and
+            is the recommended value on RAM-constrained machines. This is a scheduling
+            knob only: the model sees exactly the same batches in the same order.
+        val_num_workers: Workers for the validation loader (defaults to ``num_workers``).
+            Validation runs are typically I/O-bound and short; 0-2 workers is often
+            plenty, and each spawn worker costs ~1 GB RSS for its interpreter +
+            library imports.
         seed: Seed for the shuffle order and the per-worker RNGs. Defaults to ``cfg.seed``.
             Pinning it explicitly is what makes the epoch order depend only on the config:
             a bare ``shuffle=True`` seeds its sampler from whatever the global torch RNG
@@ -138,20 +152,27 @@ def build_helio_dataloaders(
     )
 
     workers = cfg.num_workers if num_workers is None else num_workers
+    val_workers = workers if val_num_workers is None else val_num_workers
     base_seed = cfg.seed if seed is None else seed
 
-    loader_kwargs = dict(
-        batch_size=cfg.batch_size,
-        num_workers=workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-    if workers > 0:
-        # "spawn": the dataset holds an s3fs/boto3 handle that does not survive fork.
-        # Both of these are rejected outright when num_workers == 0.
-        loader_kwargs["multiprocessing_context"] = "spawn"
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["worker_init_fn"] = partial(_seed_worker, base_seed=base_seed)
+    def _loader_kwargs(worker_count: int) -> dict:
+        kwargs = dict(
+            batch_size=cfg.batch_size,
+            num_workers=worker_count,
+            pin_memory=True,
+            drop_last=True,
+        )
+        if worker_count > 0:
+            # "spawn": the dataset holds an s3fs/boto3 handle that does not survive fork.
+            # Both of these are rejected outright when num_workers == 0.
+            kwargs["multiprocessing_context"] = "spawn"
+            kwargs["persistent_workers"] = True
+            kwargs["worker_init_fn"] = partial(_seed_worker, base_seed=base_seed)
+            # prefetch_factor defaults to 2 inside DataLoader; only pass it when the
+            # caller asked for something else so 0-worker runs stay valid.
+            if prefetch_factor is not None:
+                kwargs["prefetch_factor"] = prefetch_factor
+        return kwargs
 
     # An explicit generator makes the shuffle a function of the seed alone, rather than
     # of the global RNG state at the moment the iterator happens to be created.
@@ -159,8 +180,8 @@ def build_helio_dataloaders(
     shuffle_generator.manual_seed(base_seed)
 
     train_loader = DataLoader(
-        train_dataset, shuffle=True, generator=shuffle_generator, **loader_kwargs
+        train_dataset, shuffle=True, generator=shuffle_generator, **_loader_kwargs(workers)
     )
     # No generator for validation: it is not shuffled, so there is nothing to seed.
-    val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, shuffle=False, **_loader_kwargs(val_workers))
     return train_loader, val_loader
